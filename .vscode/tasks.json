@@ -1,0 +1,20 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "process",
+            "command": "cargo",
+            "args": ["watch", "-x", "clippy"],
+            "problemMatcher": ["$rustc"],
+            "group": "build",
+            "label": "rust: cargo clippy (watch)"
+        },
+        {
+            "type": "cargo",
+            "command": "clippy",
+            "problemMatcher": ["$rustc"],
+            "group": "build",
+            "label": "rust: cargo clippy (once)"
+        }
+    ]
+}
