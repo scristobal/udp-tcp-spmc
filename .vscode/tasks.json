@@ -4,7 +4,7 @@
         {
             "type": "process",
             "command": "cargo",
-            "args": ["watch", "-x", "clippy"],
+            "args": ["watch", "--clear", "-x", "clippy"],
             "problemMatcher": ["$rustc"],
             "group": "build",
             "label": "rust: cargo clippy (watch)"
