@@ -1,9 +1,11 @@
 use clap::Parser;
+use tokio::select;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter, Result};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio_util::bytes::BytesMut;
@@ -35,6 +37,7 @@ async fn run(
     local_port: u16,
     remote_host: String,
     remote_port: u16,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let source = format!("{remote_host}:{remote_port}")
         .parse::<SocketAddr>()
@@ -61,21 +64,43 @@ async fn run(
         let read = reader.read_buf(&mut buffer);
 
         tokio::select! {
-            _ =  tokio::signal::ctrl_c() => {break; }
+            _ =  cancel.cancelled() => {
+                break;
+            }
             Ok(n) = read => {
-                let  data = buffer.split_to(n).freeze();
 
                 let mut sinks = sinks.lock().await;
-                let mut failed_sinks_indexes = vec![];
+                let mut failed_sink_indexes = vec![];
 
-                for |(index, sink) in  sinks.iter_mut().enumerate() {
-                    if let Err(e) = sink.write_all(&data).await {
-                        eprintln!("Failed to write to sink: {}, maybe the sink is closed?", e);
-                        failed_sinks_indexes.push(index);
+                for (index, sink) in  sinks.iter_mut().enumerate() {
+
+                    let  mut data = buffer.split_to(n).freeze();
+                    let mut writer = BufWriter::new(sink);
+
+                    let mut m = 0;
+
+                     while m < n {
+                        m += match writer.write_buf(&mut data).await {
+                            Err(e) => {
+                                eprintln!("Error writing: {}", e);
+                                failed_sink_indexes.push(index);
+                                break;
+                            },
+                            Ok(0) => {
+                                // Ok(0) means nothing was be written, so most likely the client socket disconnected and needs to be removed
+                                failed_sink_indexes.push(index);
+                                break;
+                            },
+
+                            Ok(m) => {
+                                m
+                            },
+                        }
                     }
+
                 }
 
-                for index in failed_sinks_indexes {
+                for index in failed_sink_indexes {
                     sinks.remove(index);
                 }
             }
@@ -100,7 +125,21 @@ async fn main() -> Result<()> {
 
     println!("running with passed args {:?}", Args::parse());
 
-    run(local_host, local_port, remote_host, remote_port).await
+    let cancel = CancellationToken::new();
+
+    tokio::spawn(run(
+        local_host,
+        local_port,
+        remote_host,
+        remote_port,
+        cancel.clone(),
+    ));
+
+    tokio::signal::ctrl_c().await?;
+
+    cancel.cancel();
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -125,9 +164,17 @@ mod tests {
         let mut sink_1 = TcpStream::connect(remote_addr.clone()).await.unwrap();
         let mut sink_2 = TcpStream::connect(remote_addr.clone()).await.unwrap();
 
-        let test_data = vec![1, 2, 3];
+        let cancel = CancellationToken::new();
 
-        tokio::spawn(run(local_host, local_port, remote_host, remote_port));
+        tokio::spawn(run(
+            local_host,
+            local_port,
+            remote_host,
+            remote_port,
+            cancel.clone(),
+        ));
+
+        let test_data = vec![1, 2, 3];
 
         tokio::spawn({
             let data = test_data.clone();
@@ -153,8 +200,9 @@ mod tests {
         });
 
         let mut remote_stream = remote.accept().await.unwrap().0;
-
         let r = remote_stream.write(&test_data).await.unwrap();
+
+        cancel.cancel();
 
         assert_eq!(r, test_data.len());
     }
