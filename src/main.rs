@@ -38,14 +38,18 @@ async fn run(
 ) -> Result<()> {
     let source = format!("{remote_host}:{remote_port}")
         .parse::<SocketAddr>()
-        .unwrap();
-    let source = TcpStream::connect(source).await.unwrap();
+        .expect("Failed to parse remote host address");
+
+    let source = TcpStream::connect(source)
+        .await
+        .expect("Failed to connect to remote host");
 
     let sinks: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(vec![]));
 
     let listener = format!("{local_host}:{local_port}")
         .parse::<SocketAddr>()
-        .unwrap();
+        .expect("Failed to parse local host address");
+
     let listener = TcpListener::bind(listener)
         .await
         .expect("Failed to bind TCP listener");
