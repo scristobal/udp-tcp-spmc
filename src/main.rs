@@ -13,18 +13,18 @@ use tokio_util::bytes::BytesMut;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Local host for clients to connect and get data pushed
-    #[arg(short, long, default_value_t = String::from("localhost"), env = "HOST")]
+    #[arg(short = 'h', long, default_value_t = String::from("localhost"), env = "HOST")]
     local_host: String,
     /// Local port for clients to connect and get data pushed
-    #[arg(short, long, default_value_t = 8080u16, env = "PORT")]
+    #[arg(short = 'p', long, default_value_t = 8080u16, env = "PORT")]
     local_port: u16,
 
     /// Remote host to pull data from
-    #[arg(short, long, env = "REMOTE_HOST")]
+    #[arg(short = 'r', long, env = "REMOTE_HOST")]
     remote_host: String,
 
     /// Remote port to pull data from
-    #[arg(short, long, env = "REMOTE_PORT")]
+    #[arg(short = 'q', long, env = "REMOTE_PORT")]
     remote_port: u16,
 }
 
