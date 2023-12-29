@@ -1,15 +1,19 @@
-use clap::Parser;
-use tokio::sync::broadcast::{self, Sender};
+#![feature(async_closure)]
 
+use clap::Parser;
+use tokio::join;
+use tokio::sync::broadcast::error::SendError;
+use tokio::sync::broadcast::{self, Sender};
+use tokio::{net::TcpStream, try_join};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn, Level};
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use std::net::SocketAddr;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, Result};
 use tokio::net::TcpListener;
-use tokio::net::TcpStream;
+
 use tokio_util::bytes::{Bytes, BytesMut};
 
 /// Simple TCP broadcaster, connects to a remote TCP host and broadcast to a local TCP socket
@@ -32,7 +36,7 @@ struct Args {
     remote_port: u16,
 }
 
-const BUFFER_SIZE: usize = 1024;
+const BUFFER_SIZE: usize = 3;
 
 async fn stream_to_tx<'a>(stream: TcpStream, tx: Sender<Bytes>, cancel: CancellationToken) {
     let mut buffer = BytesMut::with_capacity(BUFFER_SIZE);
@@ -44,10 +48,15 @@ async fn stream_to_tx<'a>(stream: TcpStream, tx: Sender<Bytes>, cancel: Cancella
         tokio::select! {
             _ = cancel.cancelled() => { break; }
             Ok(n) = read => {
-                if n==0 {continue;}
+                if n==0 {
+                    continue;
+                }
+
                 let data = buffer.split_to(n).freeze();
-                if let Err(e) =  tx.send(data) {
-                    error!("when sending data to the channel {}",e);
+
+                match tx.send(data) {
+                    Ok(r) => info!("send {n} bytes to {r} receivers"),
+                    Err(SendError(b)) => warn!("no listeners subscribed when received {} bytes to the channel", b.len())
                 }
             }
         }
@@ -61,12 +70,15 @@ async fn tx_to_streams(listener: TcpListener, tx: Sender<Bytes>, cancel: Cancell
 
             async move {
                 while let Ok(mut data) = rx.recv().await {
-                    match stream.write_buf(&mut data).await {
-                        Ok(n) => {
-                            warn!("we wrote n bytes: {}", n)
+                    info!("received {} bytes from the channel", data.len());
+
+                    match stream.write_all_buf(&mut data).await {
+                        Ok(_) => {
+                            info!("success writing all buffer bytes");
                         }
                         Err(e) => {
-                            error!("when writing buffer to the stream: {}", e)
+                            warn!("when writing buffer to the stream: {e}, dropping receiver");
+                            break;
                         }
                     };
                 }
@@ -82,17 +94,18 @@ async fn tx_to_streams(listener: TcpListener, tx: Sender<Bytes>, cancel: Cancell
     }
 }
 
-const MAX_CHANNEL_MESSAGES: usize = 10;
+const MAX_CHANNEL_MESSAGES: usize = 1024;
 
 async fn run(stream: TcpStream, listener: TcpListener, cancel: CancellationToken) -> Result<()> {
     let (tx, _) = broadcast::channel::<Bytes>(MAX_CHANNEL_MESSAGES);
 
-    tokio::spawn(stream_to_tx(stream, tx.clone(), cancel.clone()));
-    tokio::spawn(tx_to_streams(listener, tx.clone(), cancel.clone()));
+    let stream_to_tx = tokio::spawn(stream_to_tx(stream, tx.clone(), cancel.clone()));
+    let tx_to_stream = tokio::spawn(tx_to_streams(listener, tx.clone(), cancel.clone()));
 
-    tokio::signal::ctrl_c().await?;
+    let (stream_to_tx, tx_to_stream) = join!(stream_to_tx, tx_to_stream);
 
-    cancel.cancel();
+    stream_to_tx?;
+    tx_to_stream?;
 
     Ok(())
 }
@@ -132,11 +145,15 @@ async fn main() -> Result<()> {
 
     let cancel = CancellationToken::new();
 
-    tokio::spawn(run(stream, listener, cancel.clone()));
+    let run = tokio::spawn(run(stream, listener, cancel.clone()));
+    let signal = tokio::spawn(tokio::signal::ctrl_c());
 
-    tokio::signal::ctrl_c().await?;
+    let (r, s) = try_join!(signal, run)?;
 
     cancel.cancel();
+
+    r?;
+    s?;
 
     Ok(())
 }
@@ -144,14 +161,23 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
 
-    use std::{thread::sleep, time::Duration};
+    use rand::Rng;
+    use std::{
+        sync::{
+            atomic::{AtomicU16, Ordering},
+            Arc,
+        },
+        thread::sleep,
+        time::Duration,
+    };
 
     use super::*;
-    use tokio::{join, net::TcpStream};
+    use tokio::{net::TcpStream, try_join};
 
     #[test_log::test(tokio::test)]
     async fn run_test() {
         let cancel = CancellationToken::new();
+        let num_asserts = Arc::new(AtomicU16::new(0));
 
         let listener_addr = "127.0.0.1:8081";
         let stream_addr = "127.0.0.1:9091";
@@ -159,12 +185,18 @@ mod tests {
         let stream_listener = TcpListener::bind(&stream_addr).await.unwrap();
         let listener = TcpListener::bind(&listener_addr).await.unwrap();
 
-        let data = b"test data";
+        const NUM_BUFFERS: usize = 3;
+
+        let mut data = [0_u8; BUFFER_SIZE * NUM_BUFFERS];
+
+        let mut rng = rand::thread_rng();
+
+        data.iter_mut().for_each(|b| *b = rng.gen());
 
         tokio::spawn({
             async move {
                 let mut remote_stream = stream_listener.accept().await.unwrap().0;
-                remote_stream.write_all(data).await.unwrap();
+                remote_stream.write_all(&data).await.unwrap();
             }
         });
 
@@ -178,33 +210,34 @@ mod tests {
         // TODO: wait for `run` to wire everything up properly
         sleep(Duration::from_secs(2));
 
-        let handle_1 = tokio::spawn({
-            let mut sink = TcpStream::connect(&listener_addr).await.unwrap();
-
-            async move {
-                let mut buffer = [0u8; BUFFER_SIZE];
-                let n = sink.read(&mut buffer).await.unwrap();
-
-                assert_eq!(buffer[..n].to_vec(), data);
-                assert!(buffer[..n].to_vec() != b"wrong test data");
-            }
+        tokio::spawn(async move {
+            TcpStream::connect(listener_addr).await.unwrap();
         });
 
-        let handle_2 = tokio::spawn({
-            let mut sink = TcpStream::connect(&listener_addr).await.unwrap();
+        let launch_client = || {
+            let num_asserts = num_asserts.clone();
 
             async move {
-                let mut buffer = [0u8; BUFFER_SIZE];
-                let n = sink.read(&mut buffer).await.unwrap();
+                let mut sink = TcpStream::connect(&listener_addr).await.unwrap();
+                let mut count_read = 0;
+                while count_read < data.len() {
+                    let mut buffer = [0u8; BUFFER_SIZE];
+                    let n = sink.read(&mut buffer).await.unwrap();
 
-                assert_eq!(buffer[..n].to_vec(), data);
+                    assert_eq!(buffer[..n].to_vec(), data[count_read..(count_read + n)]);
+                    num_asserts.fetch_add(1, Ordering::Relaxed);
+
+                    count_read += n;
+                }
             }
-        });
+        };
 
-        let (r, s) = join!(handle_1, handle_2);
+        let handle_1 = tokio::spawn(launch_client());
+        let handle_2 = tokio::spawn(launch_client());
 
-        r.unwrap();
-        s.unwrap();
+        try_join!(handle_1, handle_2).unwrap();
+
+        assert_eq!(num_asserts.load(Ordering::Relaxed), 2 * NUM_BUFFERS as u16);
 
         cancel.cancel()
     }
