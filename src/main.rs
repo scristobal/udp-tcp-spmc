@@ -1,13 +1,10 @@
 #![feature(async_closure)]
 
 use clap::Parser;
-use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, Result};
-use tokio::join;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast::error::SendError;
 use tokio::sync::broadcast::{self, Sender};
-use tokio::task::JoinHandle;
 use tokio::{net::TcpStream, try_join};
 use tokio_util::bytes::{Bytes, BytesMut};
 use tokio_util::sync::CancellationToken;
@@ -18,20 +15,13 @@ use tracing_subscriber::FmtSubscriber;
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Local host for clients to connect and get data pushed
-    #[arg(short = 'i', long, default_value_t = String::from("localhost"), env = "HOST")]
-    local_host: String,
-    /// Local port for clients to connect and get data pushed
-    #[arg(short = 'p', long, default_value_t = 8080u16, env = "PORT")]
-    local_port: u16,
+    /// Local host:port for clients to connect and get data pushed
+    #[arg(short = 'l', long)]
+    local: String,
 
-    /// Remote host to pull data from
-    #[arg(short = 'j', long, env = "REMOTE_HOST")]
-    remote_host: String,
-
-    /// Remote port to pull data from
-    #[arg(short = 'q', long, env = "REMOTE_PORT")]
-    remote_port: u16,
+    /// Remote host:port to pull data from
+    #[arg(short = 'r', long)]
+    remote: String,
 }
 
 const BUFFER_SIZE: usize = 3;
@@ -130,28 +120,17 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     // parse arguments
-    let Args {
-        local_port,
-        local_host,
-        remote_port,
-        remote_host,
-    } = Args::parse();
+    let Args { local, remote } = Args::parse();
 
     println!("running with passed args {:?}", Args::parse());
 
-    let stream = format!("{remote_host}:{remote_port}")
-        .parse::<SocketAddr>()
-        .expect("Failed to parse remote host address");
-
-    let stream = TcpStream::connect(stream)
+    // setup remote TCP stream
+    let stream = TcpStream::connect(remote)
         .await
         .expect("Failed to connect to remote host");
 
-    let listener = format!("{local_host}:{local_port}")
-        .parse::<SocketAddr>()
-        .expect("Failed to parse local host address");
-
-    let listener = TcpListener::bind(listener)
+    // setup local TCP listener
+    let listener = TcpListener::bind(local)
         .await
         .expect("Failed to bind TCP listener");
 
@@ -180,10 +159,7 @@ mod tests {
 
     use rand::Rng;
     use std::{
-        sync::{
-            atomic::{AtomicU16, Ordering},
-            Arc,
-        },
+        sync::atomic::{AtomicU16, Ordering},
         thread::sleep,
         time::Duration,
     };
@@ -194,7 +170,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn run_test() {
         let cancel = CancellationToken::new();
-        let num_asserts = Arc::new(AtomicU16::new(0));
+        static NUM_ASSERTS: AtomicU16 = AtomicU16::new(0);
 
         let listener_addr = "127.0.0.1:8081";
         let stream_addr = "127.0.0.1:9091";
@@ -210,11 +186,9 @@ mod tests {
 
         data.iter_mut().for_each(|b| *b = rng.gen());
 
-        tokio::spawn({
-            async move {
-                let mut remote_stream = stream_listener.accept().await.unwrap().0;
-                remote_stream.write_all(&data).await.unwrap();
-            }
+        tokio::spawn(async move {
+            let mut remote_stream = stream_listener.accept().await.unwrap().0;
+            remote_stream.write_all(&data).await.unwrap();
         });
 
         // TODO: wait for `remote_stream` properly
@@ -231,21 +205,17 @@ mod tests {
             TcpStream::connect(listener_addr).await.unwrap();
         });
 
-        let launch_client = || {
-            let num_asserts = num_asserts.clone();
+        let launch_client = || async move {
+            let mut sink = TcpStream::connect(&listener_addr).await.unwrap();
+            let mut count_read = 0;
+            while count_read < data.len() {
+                let mut buffer = [0u8; BUFFER_SIZE];
+                let n = sink.read(&mut buffer).await.unwrap();
 
-            async move {
-                let mut sink = TcpStream::connect(&listener_addr).await.unwrap();
-                let mut count_read = 0;
-                while count_read < data.len() {
-                    let mut buffer = [0u8; BUFFER_SIZE];
-                    let n = sink.read(&mut buffer).await.unwrap();
+                assert_eq!(buffer[..n].to_vec(), data[count_read..(count_read + n)]);
+                NUM_ASSERTS.fetch_add(1, Ordering::Relaxed);
 
-                    assert_eq!(buffer[..n].to_vec(), data[count_read..(count_read + n)]);
-                    num_asserts.fetch_add(1, Ordering::Relaxed);
-
-                    count_read += n;
-                }
+                count_read += n;
             }
         };
 
@@ -254,7 +224,7 @@ mod tests {
 
         try_join!(handle_1, handle_2).unwrap();
 
-        assert_eq!(num_asserts.load(Ordering::Relaxed), 2 * NUM_BUFFERS as u16);
+        assert_eq!(NUM_ASSERTS.load(Ordering::Relaxed), 2 * NUM_BUFFERS as u16);
 
         cancel.cancel()
     }
