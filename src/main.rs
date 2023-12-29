@@ -1,20 +1,18 @@
 #![feature(async_closure)]
 
 use clap::Parser;
+use std::net::SocketAddr;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, Result};
 use tokio::join;
+use tokio::net::TcpListener;
 use tokio::sync::broadcast::error::SendError;
 use tokio::sync::broadcast::{self, Sender};
+use tokio::task::JoinHandle;
 use tokio::{net::TcpStream, try_join};
+use tokio_util::bytes::{Bytes, BytesMut};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
-
-use std::net::SocketAddr;
-
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, Result};
-use tokio::net::TcpListener;
-
-use tokio_util::bytes::{Bytes, BytesMut};
 
 /// Simple TCP broadcaster, connects to a remote TCP host and broadcast to a local TCP socket
 #[derive(Parser, Debug, Clone)]
@@ -38,6 +36,7 @@ struct Args {
 
 const BUFFER_SIZE: usize = 3;
 
+/// Continuously reads data from a TCP stream and sends it to a channel of bytes.
 async fn stream_to_tx<'a>(stream: TcpStream, tx: Sender<Bytes>, cancel: CancellationToken) {
     let mut buffer = BytesMut::with_capacity(BUFFER_SIZE);
     let mut reader = BufReader::new(stream);
@@ -63,61 +62,74 @@ async fn stream_to_tx<'a>(stream: TcpStream, tx: Sender<Bytes>, cancel: Cancella
     }
 }
 
+/// Handles the transmission of data from a channel to multiple TCP streams asynchronously.
+///
+/// It continuously listens for new connections and spawns tasks to handle the transmission
+/// for each connected stream.
 async fn tx_to_streams(listener: TcpListener, tx: Sender<Bytes>, cancel: CancellationToken) {
+    // handles the transmission of data from a channel to a TCP stream asynchronously.
     let handle_listener = |mut stream: TcpStream| {
-        tokio::spawn({
-            let mut rx = tx.subscribe();
+        let mut rx = tx.subscribe();
 
-            async move {
-                while let Ok(mut data) = rx.recv().await {
-                    info!("received {} bytes from the channel", data.len());
+        async move || {
+            while let Ok(mut data) = rx.recv().await {
+                info!("received {} bytes from the channel", data.len());
 
-                    match stream.write_all_buf(&mut data).await {
-                        Ok(_) => {
-                            info!("success writing all buffer bytes");
-                        }
-                        Err(e) => {
-                            warn!("when writing buffer to the stream: {e}, dropping receiver");
-                            break;
-                        }
-                    };
-                }
+                match stream.write_all_buf(&mut data).await {
+                    Ok(_) => {
+                        info!("success writing all buffer bytes");
+                    }
+                    Err(e) => {
+                        warn!("when writing buffer to the stream: {e}, dropping receiver");
+                        break;
+                    }
+                };
             }
-        });
+        }
     };
 
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => {break}
-            Ok(( stream,_)) = listener.accept() => handle_listener(stream)
+            _ = cancel.cancelled() => {
+                break;
+            }
+            Ok(( stream,_)) = listener.accept() => {
+                tokio::spawn(handle_listener(stream)());
+            }
         }
     }
 }
 
 const MAX_CHANNEL_MESSAGES: usize = 1024;
 
-async fn run(stream: TcpStream, listener: TcpListener, cancel: CancellationToken) -> Result<()> {
+async fn broadcast(
+    stream: TcpStream,
+    listener: TcpListener,
+    cancel: CancellationToken,
+) -> Result<()> {
+    // create the channel to share data between streams
     let (tx, _) = broadcast::channel::<Bytes>(MAX_CHANNEL_MESSAGES);
 
+    // spawn the tasks to handle the data transmission
     let stream_to_tx = tokio::spawn(stream_to_tx(stream, tx.clone(), cancel.clone()));
     let tx_to_stream = tokio::spawn(tx_to_streams(listener, tx.clone(), cancel.clone()));
 
-    let (stream_to_tx, tx_to_stream) = join!(stream_to_tx, tx_to_stream);
-
-    stream_to_tx?;
-    tx_to_stream?;
+    // wait for the tasks to complete
+    try_join!(stream_to_tx, tx_to_stream)?;
 
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // setup tracing
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::TRACE)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
+    // parse arguments
     let Args {
         local_port,
         local_host,
@@ -143,17 +155,22 @@ async fn main() -> Result<()> {
         .await
         .expect("Failed to bind TCP listener");
 
+    // setup cancellation token
     let cancel = CancellationToken::new();
 
-    let run = tokio::spawn(run(stream, listener, cancel.clone()));
+    //  setup tasks
+    let broadcast = tokio::spawn(broadcast(stream, listener, cancel.clone()));
     let signal = tokio::spawn(tokio::signal::ctrl_c());
 
-    let (r, s) = try_join!(signal, run)?;
+    // wait for any of the tasks to complete
+    let (broadcast, signal) = try_join!(signal, broadcast)?;
 
+    // cancel tasks
     cancel.cancel();
 
-    r?;
-    s?;
+    // propagate errors upstream
+    broadcast?;
+    signal?;
 
     Ok(())
 }
@@ -205,7 +222,7 @@ mod tests {
 
         let stream = TcpStream::connect(&stream_addr).await.unwrap();
 
-        tokio::spawn(run(stream, listener, cancel.clone()));
+        tokio::spawn(broadcast(stream, listener, cancel.clone()));
 
         // TODO: wait for `run` to wire everything up properly
         sleep(Duration::from_secs(2));
