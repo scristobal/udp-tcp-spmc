@@ -1,15 +1,16 @@
 use clap::Parser;
-use tokio::sync::Mutex;
+use tokio::sync::broadcast::{self, Sender};
+
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, Level};
+use tracing::{error, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter, Result};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, Result};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tokio_util::bytes::BytesMut;
+use tokio_util::bytes::{Bytes, BytesMut};
 
 /// Simple TCP broadcaster, connects to a remote TCP host and broadcast to a local TCP socket
 #[derive(Parser, Debug, Clone)]
@@ -33,9 +34,7 @@ struct Args {
 
 const BUFFER_SIZE: usize = 1024;
 
-async fn run(stream: TcpStream, listener: TcpListener, cancel: CancellationToken) -> Result<()> {
-    let sinks: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(vec![]));
-
+async fn stream_to_tx<'a>(stream: TcpStream, tx: Sender<Bytes>, cancel: CancellationToken) {
     let mut buffer = BytesMut::with_capacity(BUFFER_SIZE);
     let mut reader = BufReader::new(stream);
 
@@ -43,59 +42,57 @@ async fn run(stream: TcpStream, listener: TcpListener, cancel: CancellationToken
         let read = reader.read_buf(&mut buffer);
 
         tokio::select! {
-            _ =  cancel.cancelled() => {
-                break;
-            }
+            _ = cancel.cancelled() => { break; }
             Ok(n) = read => {
-
-                let mut sinks = sinks.lock().await;
-                let mut failed_sink_indexes = vec![];
-
-                let read = buffer.split_to(n);
-
-                for (index, sink) in  sinks.iter_mut().enumerate() {
-
-                    let addr = sink.peer_addr().unwrap();
-
-                    let mut data = read.clone().freeze();
-
-                    let mut writer = BufWriter::new(sink);
-
-                    let mut m = 0;
-
-                    while m < n {
-
-                        m += match writer.write_buf(&mut data).await {
-                            Err(e) => {
-                                error!("Error writing to {}: {}", addr,  e);
-                                failed_sink_indexes.push(index);
-                                break;
-                            },
-                            Ok(0) => {
-                                info!("Could not write to {}, disconnected", addr);
-                                // Ok(0) means nothing was be written, so most likely the client socket disconnected and needs to be removed
-                                failed_sink_indexes.push(index);
-                                break;
-                            },
-                            Ok(r) => {
-                                println!("read something {}", &r);
-                                r
-                            },
-                        }
-                    }
-
+                if n==0 {continue;}
+                let data = buffer.split_to(n).freeze();
+                if let Err(e) =  tx.send(data) {
+                    error!("when sending data to the channel {}",e);
                 }
-
-                for index in failed_sink_indexes {
-                    sinks.remove(index);
-                }
-            }
-            Ok(( stream,_)) = listener.accept() => {
-                let mut sinks = sinks.lock().await;
-                sinks.push(stream);
             }
         }
     }
+}
+
+async fn tx_to_streams(listener: TcpListener, tx: Sender<Bytes>, cancel: CancellationToken) {
+    let handle_listener = |mut stream: TcpStream| {
+        tokio::spawn({
+            let mut rx = tx.subscribe();
+
+            async move {
+                while let Ok(mut data) = rx.recv().await {
+                    match stream.write_buf(&mut data).await {
+                        Ok(n) => {
+                            warn!("we wrote n bytes: {}", n)
+                        }
+                        Err(e) => {
+                            error!("when writing buffer to the stream: {}", e)
+                        }
+                    };
+                }
+            }
+        });
+    };
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {break}
+            Ok(( stream,_)) = listener.accept() => handle_listener(stream)
+        }
+    }
+}
+
+const MAX_CHANNEL_MESSAGES: usize = 10;
+
+async fn run(stream: TcpStream, listener: TcpListener, cancel: CancellationToken) -> Result<()> {
+    let (tx, _) = broadcast::channel::<Bytes>(MAX_CHANNEL_MESSAGES);
+
+    tokio::spawn(stream_to_tx(stream, tx.clone(), cancel.clone()));
+    tokio::spawn(tx_to_streams(listener, tx.clone(), cancel.clone()));
+
+    tokio::signal::ctrl_c().await?;
+
+    cancel.cancel();
 
     Ok(())
 }
@@ -150,12 +147,10 @@ mod tests {
     use std::{thread::sleep, time::Duration};
 
     use super::*;
-    use tokio::net::TcpStream;
+    use tokio::{join, net::TcpStream};
 
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn run_test() {
-        // create a tests server
-
         let cancel = CancellationToken::new();
 
         let listener_addr = "127.0.0.1:8081";
@@ -164,35 +159,26 @@ mod tests {
         let stream_listener = TcpListener::bind(&stream_addr).await.unwrap();
         let listener = TcpListener::bind(&listener_addr).await.unwrap();
 
-        let data = vec![1, 2, 3];
+        let data = b"test data";
 
         tokio::spawn({
-            let test_data = data.clone();
-
             async move {
                 let mut remote_stream = stream_listener.accept().await.unwrap().0;
-
-                println!("after connect");
-
-                let r = remote_stream.write(&test_data).await.unwrap();
-
-                println!("after sending");
-
-                assert_eq!(r, test_data.len());
+                remote_stream.write_all(data).await.unwrap();
             }
         });
 
+        // TODO: wait for `remote_stream` properly
         sleep(Duration::from_secs(2));
 
         let stream = TcpStream::connect(&stream_addr).await.unwrap();
 
         tokio::spawn(run(stream, listener, cancel.clone()));
 
+        // TODO: wait for `run` to wire everything up properly
         sleep(Duration::from_secs(2));
 
         let handle_1 = tokio::spawn({
-            let data = data.clone();
-
             let mut sink = TcpStream::connect(&listener_addr).await.unwrap();
 
             async move {
@@ -200,13 +186,11 @@ mod tests {
                 let n = sink.read(&mut buffer).await.unwrap();
 
                 assert_eq!(buffer[..n].to_vec(), data);
-                assert_eq!(buffer[..n].to_vec(), vec![1, 2]);
+                assert!(buffer[..n].to_vec() != b"wrong test data");
             }
         });
 
         let handle_2 = tokio::spawn({
-            let data = data.clone();
-
             let mut sink = TcpStream::connect(&listener_addr).await.unwrap();
 
             async move {
@@ -217,10 +201,10 @@ mod tests {
             }
         });
 
-        handle_1.await.unwrap();
-        handle_2.await.unwrap();
+        let (r, s) = join!(handle_1, handle_2);
 
-        // let (r, s) = join!(handle_1, handle_2);
+        r.unwrap();
+        s.unwrap();
 
         cancel.cancel()
     }
