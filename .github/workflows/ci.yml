@@ -31,6 +31,10 @@ jobs:
               with:
                   command: test
 
+            - uses: codecov/codecov-action@v3
+              env:
+                  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
     fmt:
         name: Rustfmt
         runs-on: ubuntu-latest
