@@ -1,10 +1,7 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-use tokio::sync::broadcast::error::SendError;
 use tokio::sync::broadcast::Sender;
-
 use tokio_util::bytes::{Bytes, BytesMut};
-use tracing::{info, instrument, warn};
+use tracing::{debug, instrument, warn};
 
 const BUFFER_SIZE: usize = 1024;
 
@@ -15,17 +12,16 @@ pub async fn reader_to_tx<R: AsyncReadExt + Unpin>(mut reader: R, tx: Sender<Byt
 
     while let Ok(n) = reader.read_buf(&mut buffer).await {
         if n == 0 {
+            debug!("no bytes read from the reader");
             continue;
         }
 
         let data = buffer.split_to(n).freeze();
 
         match tx.send(data) {
-            Ok(r) => info!("send {n} bytes to {r} receivers"),
-            Err(SendError(b)) => warn!(
-                "no listeners subscribed when received {} bytes to the channel",
-                b.len()
-            ),
+            Ok(r) => debug!("send {n} bytes to {r} receivers"),
+            Err(_) => warn!("no listeners subscribed when sending, lost {n} bytes of data"),
+            // alternatively we could try put the Bytes back, eg. Err(SendError(b)) => buffer.put(b)
         }
     }
 }
@@ -36,25 +32,19 @@ pub async fn tx_to_writer<W: AsyncWriteExt + Unpin + std::fmt::Debug>(
     mut writer: W,
     tx: Sender<Bytes>,
 ) {
-    info!("starting writer");
-
     let mut rx = tx.subscribe();
 
     while let Ok(mut data) = rx.recv().await {
-        info!("received {} bytes from the channel", data.len());
+        debug!("received {} bytes from the channel", data.len());
 
         match writer.write_all_buf(&mut data).await {
-            Ok(_) => {
-                info!("success writing all buffer bytes");
-            }
+            Ok(_) => debug!("success writing all buffer bytes"),
             Err(e) => {
                 warn!("when writing buffer to the stream: {e}, dropping receiver");
                 break;
             }
         }
     }
-
-    info!("writer dropped");
 }
 
 #[cfg(test)]
@@ -89,6 +79,7 @@ mod tests {
 
         tokio::spawn(reader_to_tx(reader, tx.clone()));
 
+        // give `reader_to_tx` a break to wire everything up
         sleep(Duration::from_secs(1));
 
         let write = tokio::spawn(async move {
@@ -124,6 +115,7 @@ mod tests {
 
         tokio::spawn(tx_to_writer(writer, tx.clone()));
 
+        // give `tx_to_writer` a break to wire everything up
         sleep(Duration::from_secs(1));
 
         let read = tokio::spawn(async move {

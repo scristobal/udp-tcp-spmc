@@ -20,6 +20,7 @@ struct Args {
     remote: String,
 }
 
+/// Utility function to use with `try_join!` in `main`
 async fn flatten<T>(handle: JoinHandle<Result<T>>) -> Result<T> {
     match handle.await {
         Ok(Ok(result)) => Ok(result),
@@ -27,6 +28,7 @@ async fn flatten<T>(handle: JoinHandle<Result<T>>) -> Result<T> {
         Err(err) => panic!("Error joining task: {:?}", err),
     }
 }
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // setup tracing

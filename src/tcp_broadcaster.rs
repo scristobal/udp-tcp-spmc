@@ -1,6 +1,5 @@
 use tokio::io::Result;
 use tokio::net::TcpListener;
-
 use tokio::sync::broadcast::{self, Sender};
 use tokio::{net::TcpStream, try_join};
 use tokio_util::bytes::Bytes;
@@ -96,14 +95,14 @@ mod tests {
             remote_stream.write_all(&data).await.unwrap();
         });
 
-        // TODO: wait for `remote_stream` properly
+        // give `remote_stream` a break to setup
         sleep(Duration::from_secs(1));
 
         let stream = TcpStream::connect(&stream_addr).await.unwrap();
 
         tokio::spawn(tcp_broadcaster(stream, listener));
 
-        // TODO: wait for `run` to wire everything up properly
+        // give `tcp_broadcaster` a break to wire things up
         sleep(Duration::from_secs(1));
 
         tokio::spawn(TcpStream::connect(listener_addr));
