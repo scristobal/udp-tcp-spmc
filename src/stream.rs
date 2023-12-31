@@ -5,7 +5,7 @@ use tokio::{net::TcpStream, try_join};
 use tokio_util::bytes::Bytes;
 use tracing::instrument;
 
-use crate::async_sender::{reader_to_tx, tx_to_writer};
+use crate::asyncsender::{reader_to_tx, tx_to_writer};
 
 /// Continuously reads data from a TCP stream and sends it to a channel of bytes.
 #[instrument(name = "tcp_broadcaster", skip_all)]
@@ -78,20 +78,20 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     async fn broadcast_test() {
-        let listener_addr = "127.0.0.1:8081";
-        let stream_addr = "127.0.0.1:9091";
-
-        let stream_listener = TcpListener::bind(&stream_addr).await.unwrap();
-        let listener = TcpListener::bind(&listener_addr).await.unwrap();
-
+        // prepare test data
         let mut data = [0_u8; CHUNK_SIZE * NUM_CHUNKS];
-
         let mut rng = rand::thread_rng();
-
         data.iter_mut().for_each(|b| *b = rng.gen());
 
+        // bind addresses to mock servers and clients
+        let listener_addr = "127.0.0.1:9081"; // <-- tests TCP clients will connect here
+        let stream_addr = "127.0.0.1:9091"; // <-- test data will be send here
+
+        let stream = TcpListener::bind(&stream_addr).await.unwrap();
+        let listener = TcpListener::bind(&listener_addr).await.unwrap();
+
         tokio::task::spawn(async move {
-            let mut remote_stream = stream_listener.accept().await.unwrap().0;
+            let mut remote_stream = stream.accept().await.unwrap().0;
             remote_stream.write_all(&data).await.unwrap();
         });
 
@@ -107,10 +107,10 @@ mod tests {
 
         tokio::spawn(TcpStream::connect(listener_addr));
 
-        let handle_1 = tokio::spawn(launch_client(listener_addr, data));
-        let handle_2 = tokio::spawn(launch_client(listener_addr, data));
+        let client_1 = tokio::spawn(launch_client(listener_addr, data));
+        let client_2 = tokio::spawn(launch_client(listener_addr, data));
 
-        try_join!(handle_1, handle_2).unwrap();
+        try_join!(client_1, client_2).unwrap();
 
         assert_eq!(COUNT_ASSERTS.load(Ordering::Relaxed), 2 * NUM_CHUNKS as u16);
     }

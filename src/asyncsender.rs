@@ -3,7 +3,7 @@ use tokio::sync::broadcast::Sender;
 use tokio_util::bytes::{Bytes, BytesMut};
 use tracing::{debug, instrument, warn};
 
-const BUFFER_SIZE: usize = 1024;
+const BUFFER_SIZE: usize = 8 * 1024;
 
 /// Continuously reads data from an async reader and sends it to a channel of bytes.
 #[instrument(name = "async_sender", skip_all)]
