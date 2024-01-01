@@ -1,5 +1,5 @@
 [package]
-name = "tcp-broadcast"
+name = "udp-tcp-spmc-broadcast"
 version = "0.1.0"
 edition = "2021"
 
