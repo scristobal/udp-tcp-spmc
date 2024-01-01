@@ -1,4 +1,4 @@
-# Simple TCP/UDP Single Producer, Multiple Consumers broadcast
+# TCP/UDP Single Producer, Multiple Consumers broadcast
 
 This is a rather simple but performant implementation of a single producer, multiple consumer over UDP or TCP.
 
