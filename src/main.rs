@@ -1,12 +1,11 @@
 use clap::Parser;
-use tcp_broadcast::tcp_broadcaster;
-use tcp_broadcast::udp_broadcaster;
 use tokio::io::Result;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::task::JoinHandle;
 use tokio::{net::TcpStream, try_join};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
+use udp_tcp_spmc_broadcast::{tcp_broadcaster, udp_broadcaster};
 
 /// Simple TCP broadcaster, connects to a remote TCP host and broadcast to a local TCP socket
 #[derive(Parser, Debug, Clone)]
