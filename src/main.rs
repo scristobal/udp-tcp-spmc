@@ -1,6 +1,6 @@
 use clap::Parser;
-use tcp_broadcast::socket::udp_broadcaster;
-use tcp_broadcast::stream::tcp_broadcaster;
+use tcp_broadcast::tcp_broadcaster;
+use tcp_broadcast::udp_broadcaster;
 use tokio::io::Result;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::task::JoinHandle;
@@ -30,20 +30,7 @@ async fn flatten<T>(handle: JoinHandle<Result<T>>) -> Result<T> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // setup tracing
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    // parse arguments
-    let Args { consumer, producer } = Args::parse();
-
-    info!("Running with passed args {:?}", Args::parse());
-
+async fn setup(consumer: &str, producer: &str) -> JoinHandle<Result<()>> {
     // setup local TCP listener
     let listener = TcpListener::bind(&producer)
         .await
@@ -56,7 +43,7 @@ async fn main() -> Result<()> {
         .first()
         .expect("Invalid producer parameter, missing protocol: proto://<domain>:<port>");
 
-    let broadcast = match protocol {
+    match protocol {
         "tcp" => {
             // setup remote TCP stream
             let stream = TcpStream::connect(consumer)
@@ -77,8 +64,24 @@ async fn main() -> Result<()> {
             tokio::spawn(udp_broadcaster(socket, listener))
         }
         _ => panic!("Unsupported protocol: {}", protocol),
-    };
+    }
+}
 
+#[tokio::main]
+async fn main() -> Result<()> {
+    // setup tracing
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::TRACE)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    // parse arguments
+    let Args { consumer, producer } = Args::parse();
+
+    info!("Running with passed args {:?}", Args::parse());
+
+    // setup tasks
+    let broadcast = setup(&consumer, &producer).await;
     let signal = tokio::spawn(tokio::signal::ctrl_c());
 
     // wait for any of the tasks to complete
