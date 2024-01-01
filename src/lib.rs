@@ -11,6 +11,8 @@ use tokio_util::bytes::BytesMut;
 use tracing::instrument;
 use tracing::{debug, warn};
 
+// In udp, if a message is larger than the buffer remaining bytes will be discarded
+// https://docs.rs/tokio/latest/tokio/net/struct.UdpSocket.html#method.recv_buf
 const BUFFER_SIZE: usize = 8 * 1024;
 
 /// Continuously reads data from an async reader and sends it to a channel of bytes.
