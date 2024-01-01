@@ -522,19 +522,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tcp-broadcast"
-version = "0.1.0"
-dependencies = [
- "clap",
- "rand",
- "test-log",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "test-log"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -668,6 +655,20 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "udp-tcp-spmc-broadcast"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "once_cell",
+ "rand",
+ "test-log",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

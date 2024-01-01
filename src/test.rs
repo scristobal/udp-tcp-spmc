@@ -1,8 +1,9 @@
 use super::*;
+use once_cell::sync::Lazy;
 use rand::Rng;
 use std::{
     future::Future,
-    sync::atomic::{AtomicU16, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
     thread::sleep,
     time::Duration,
 };
@@ -11,7 +12,20 @@ use tokio::{
     try_join,
 };
 
-struct WaitForTest<const N: usize>(AtomicU16);
+struct WaitForTest<const N: usize>(AtomicUsize);
+
+impl<const N: usize> WaitForTest<N> {
+    pub fn new() -> Self {
+        Self(AtomicUsize::new(0))
+    }
+    fn add(&self, n: usize) {
+        self.0.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn check(&self) -> bool {
+        self.0.load(Ordering::Relaxed) == N
+    }
+}
 
 impl<const N: usize> Future for WaitForTest<N> {
     type Output = ();
@@ -20,7 +34,7 @@ impl<const N: usize> Future for WaitForTest<N> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        if self.0.load(Ordering::Relaxed) == N as u16 {
+        if self.0.load(Ordering::Relaxed) == N {
             std::task::Poll::Ready(())
         } else {
             cx.waker().wake_by_ref();
@@ -37,7 +51,7 @@ async fn test_reader_to_tx() {
     let mut rng = rand::thread_rng();
     data.iter_mut().for_each(|b| *b = rng.gen());
 
-    static COUNT_ASSERTS: AtomicU16 = AtomicU16::new(0);
+    static COUNT_ASSERTS: Lazy<WaitForTest<1>> = Lazy::new(WaitForTest::new);
 
     let (tx, _) = tokio::sync::broadcast::channel(1);
 
@@ -58,20 +72,20 @@ async fn test_reader_to_tx() {
         async move {
             let received = rx.recv().await.unwrap();
             assert_eq!(data[..], received);
-            COUNT_ASSERTS.fetch_add(1, Ordering::Relaxed);
+            COUNT_ASSERTS.add(1);
         }
     });
 
     try_join!(write, read).unwrap();
 
-    assert_eq!(COUNT_ASSERTS.load(Ordering::Relaxed), 1);
+    assert!(COUNT_ASSERTS.check());
 }
 
 #[test_log::test(tokio::test)]
 async fn test_tx_to_writer() {
     const DATA_SIZE: usize = 1024;
 
-    static COUNT_ASSERTS: AtomicU16 = AtomicU16::new(0);
+    static COUNT_ASSERTS: Lazy<WaitForTest<1>> = Lazy::new(WaitForTest::new);
 
     let mut data = [0_u8; DATA_SIZE];
     let mut rng = rand::thread_rng();
@@ -91,7 +105,7 @@ async fn test_tx_to_writer() {
         reader.read_exact(&mut received).await.unwrap();
 
         assert_eq!(data[..], received);
-        COUNT_ASSERTS.fetch_add(1, Ordering::Relaxed);
+        COUNT_ASSERTS.add(1);
     });
 
     let send = tokio::spawn(async move {
@@ -101,7 +115,7 @@ async fn test_tx_to_writer() {
 
     try_join!(read, send).unwrap();
 
-    assert_eq!(COUNT_ASSERTS.load(Ordering::Relaxed), 1);
+    assert!(COUNT_ASSERTS.check());
 }
 
 #[test_log::test(tokio::test)]
@@ -114,7 +128,7 @@ async fn tcp_broadcast_test() {
     let mut rng = rand::thread_rng();
     data.iter_mut().for_each(|b| *b = rng.gen());
 
-    static COUNT_ASSERTS: WaitForTest<{ 2 * NUM_CHUNKS }> = WaitForTest(AtomicU16::new(0));
+    static COUNT_ASSERTS: Lazy<WaitForTest<{ 2 * NUM_CHUNKS }>> = Lazy::new(WaitForTest::new);
 
     async fn launch_client(listener_addr: &str, data: [u8; CHUNK_SIZE * NUM_CHUNKS]) {
         let mut sink = TcpStream::connect(listener_addr).await.unwrap();
@@ -126,7 +140,7 @@ async fn tcp_broadcast_test() {
             let n = sink.read(&mut buffer).await.unwrap();
 
             assert_eq!(buffer[..n].to_vec(), data[count_read..(count_read + n)]);
-            COUNT_ASSERTS.0.fetch_add(1, Ordering::Relaxed);
+            COUNT_ASSERTS.add(1);
 
             count_read += n;
         }
@@ -161,10 +175,7 @@ async fn tcp_broadcast_test() {
 
     try_join!(client_1, client_2).unwrap();
 
-    assert_eq!(
-        COUNT_ASSERTS.0.load(Ordering::Relaxed),
-        2 * NUM_CHUNKS as u16
-    );
+    assert!(COUNT_ASSERTS.check());
 }
 
 // #[ignore = "reason"]
@@ -178,7 +189,7 @@ async fn udp_broadcast_test() {
     let mut rng = rand::thread_rng();
     data.iter_mut().for_each(|b| *b = rng.gen());
 
-    static COUNT_ASSERTS: WaitForTest<{ 2 * NUM_CHUNKS }> = WaitForTest(AtomicU16::new(0));
+    static COUNT_ASSERTS: Lazy<WaitForTest<{ 2 * NUM_CHUNKS }>> = Lazy::new(WaitForTest::new);
 
     async fn launch_client(listener_addr: &str, data: [u8; CHUNK_SIZE * NUM_CHUNKS]) {
         let mut sink = TcpStream::connect(listener_addr).await.unwrap();
@@ -190,7 +201,7 @@ async fn udp_broadcast_test() {
             let n = sink.read(&mut buffer).await.unwrap();
 
             assert_eq!(buffer[..n].to_vec(), data[count_read..(count_read + n)]);
-            COUNT_ASSERTS.0.fetch_add(1, Ordering::Relaxed);
+            COUNT_ASSERTS.add(1);
 
             count_read += n;
         }
@@ -220,8 +231,5 @@ async fn udp_broadcast_test() {
 
     try_join!(client_1, client_2, sender).unwrap();
 
-    assert_eq!(
-        COUNT_ASSERTS.0.load(Ordering::Relaxed),
-        2 * NUM_CHUNKS as u16
-    );
+    assert!(COUNT_ASSERTS.check());
 }
