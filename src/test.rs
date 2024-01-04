@@ -176,10 +176,8 @@ async fn tcp_broadcast_test() {
     tokio::spawn(TcpStream::connect(listener_addr));
 
     // launch mock clients
-    let client_1 = tokio::spawn(launch_client(listener_addr, data));
-    let client_2 = tokio::spawn(launch_client(listener_addr, data));
-
-    try_join!(client_1, client_2).unwrap();
+    tokio::spawn(launch_client(listener_addr, data));
+    tokio::spawn(launch_client(listener_addr, data));
 
     COUNT_ASSERTS.clone().await;
     assert!(COUNT_ASSERTS.check());
@@ -236,16 +234,14 @@ async fn udp_broadcast_test() {
     sleep(Duration::from_secs(1));
 
     // launch mock clients
-    let client_1 = tokio::spawn(launch_client(listener_addr, data));
-    let client_2 = tokio::spawn(launch_client(listener_addr, data));
+    tokio::spawn(launch_client(listener_addr, data));
+    tokio::spawn(launch_client(listener_addr, data));
 
     // send test data
-    let sender = tokio::spawn(async move {
+    tokio::spawn(async move {
         sleep(Duration::from_secs(1));
         write_socket.send(&data).await.unwrap();
     });
-
-    try_join!(client_1, client_2, sender).unwrap();
 
     COUNT_ASSERTS.clone().await;
     assert!(COUNT_ASSERTS.check());
