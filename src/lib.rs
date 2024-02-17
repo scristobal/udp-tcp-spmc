@@ -87,7 +87,7 @@ impl AsyncRead for AsyncUdpSocket {
 /// Lagging is ignored, https://docs.rs/tokio/1.35.1/tokio/sync/broadcast/#lagging
 const MAX_CHANNEL_MESSAGES: usize = 1024;
 
-/// Broadcasts data from a TCP stream to multiple TCP streams.
+/// Broadcasts data from a single UDP socket producer to multiple TCP stream consumers.
 #[instrument(skip_all)]
 pub async fn udp_broadcaster(socket: UdpSocket, listener: TcpListener) -> Result<()> {
     // create the channel to share data between streams
@@ -103,7 +103,7 @@ pub async fn udp_broadcaster(socket: UdpSocket, listener: TcpListener) -> Result
     Ok(())
 }
 
-/// Broadcasts data from a TCP stream to multiple TCP streams.
+/// Broadcasts data from a single TCP stream producer to multiple TCP stream consumers.
 #[instrument(skip_all)]
 pub async fn tcp_broadcaster(stream: TcpStream, listener: TcpListener) -> Result<()> {
     // create the channel to share data between streams
