@@ -65,7 +65,7 @@ async fn tx_to_streams(listener: TcpListener, tx: Sender<Bytes>) {
     }
 }
 
-/// Thin wrapper around Tokio's UdpSocket to implement `AsyncRead`` trait, and by extension `ASyncReadExt`
+/// Thin wrapper around Tokio's UdpSocket to implement `AsyncRead` trait, and by extension `ASyncReadExt`
 struct AsyncUdpSocket(UdpSocket);
 
 impl From<UdpSocket> for AsyncUdpSocket {
